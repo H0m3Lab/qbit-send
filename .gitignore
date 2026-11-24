@@ -1,0 +1,4 @@
+# local settings with real addresses/passwords
+qbit-send.conf
+*.local
+.env

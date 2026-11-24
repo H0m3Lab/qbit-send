@@ -1,0 +1,20 @@
+{
+  "name": "qbit-send",
+  "slug": "qbit-send",
+  "tagline": "Send .torrent files from your Linux desktop to a remote qBittorrent.",
+  "description": "Watches your download folder with a systemd user unit and uploads every new .torrent to qBittorrent's Web API, with a Send to qBittorrent right-click for Dolphin and GNOME Files. One bash script, only curl and systemd.",
+  "status": "early",
+  "features": [
+    "Torrents saved in the browser land in qBittorrent by themselves",
+    "Right-click Send to qBittorrent in Dolphin and GNOME Files",
+    "Rejected files parked, never retried forever or deleted",
+    "Optional Web UI login, password never on a command line",
+    "Files wait in place while qBittorrent is offline"
+  ],
+  "stack": ["Bash", "systemd", "curl"],
+  "repository": "https://github.com/H0m3Lab/qbit-send",
+  "documentation": "https://github.com/H0m3Lab/qbit-send#readme",
+  "changelog": "https://github.com/H0m3Lab/qbit-send/blob/main/CHANGELOG.md",
+  "license": "MIT",
+  "screenshots": []
+}

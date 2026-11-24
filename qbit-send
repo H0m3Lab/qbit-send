@@ -1,0 +1,201 @@
+#!/bin/bash
+# qbit-send: send .torrent files to qBittorrent over its Web API.
+#   qbit-send                    send every .torrent in the watch folder (what the folder watcher runs)
+#   qbit-send FILE.torrent...    send just those files (file manager right-click)
+#   qbit-send --install          watch the folder automatically + add the right-click actions
+#   qbit-send --uninstall        undo --install
+# Settings: ~/.config/qbit-send.conf (see qbit-send.conf.example). https://github.com/H0m3Lab/qbit-send
+set -o pipefail
+VERSION="0.1.0"
+
+CONF=${QBIT_SEND_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/qbit-send.conf}
+QBIT_URL="http://localhost:8080"
+QBIT_USER=""
+QBIT_PASS=""
+WATCH_DIR="$HOME/Downloads"
+SENT_DIR=""
+FAILED_DIR=""
+NOTIFY="yes"
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+QBIT_URL=${QBIT_URL%/}
+SENT_DIR=${SENT_DIR:-$WATCH_DIR/sent-torrents}
+FAILED_DIR=${FAILED_DIR:-$WATCH_DIR/failed-torrents}
+LOG=${QBIT_SEND_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/qbit-send.log}
+UNIT_DIR=${QBIT_SEND_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}
+DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}
+SETTLE=${QBIT_SEND_SETTLE:-1}
+
+log() { mkdir -p "$(dirname "$LOG")"; echo "$(date '+%F %T') $*" >> "$LOG"; }
+say() { [ -t 1 ] && echo "$*"; log "$*"; }
+
+notify() {
+  [ "$NOTIFY" = yes ] && command -v notify-send >/dev/null && notify-send "qBittorrent" "$1" 2>/dev/null
+  return 0
+}
+
+is_torrent() { case "${1,,}" in *.torrent) return 0 ;; *) return 1 ;; esac; }
+
+# classify REPLY HTTP_CODE CURL_EXIT -> sent | failed | unreachable | forbidden
+classify() {
+  local reply=$1 code=$2 rc=$3
+  if [ "$rc" -ne 0 ] || [ "$code" = 000 ]; then echo unreachable; return; fi
+  if [ "$code" = 401 ] || [ "$code" = 403 ]; then echo forbidden; return; fi
+  # qBittorrent 5.x answers with JSON ({"success_count":1,...}); older versions with "Ok."
+  if [ "$reply" = "Ok." ] || printf '%s' "$reply" | grep -qE '"success_count": *[1-9]'; then
+    echo sent; return; fi
+  echo failed
+}
+
+JAR=""
+cleanup() { [ -n "$JAR" ] && rm -f "$JAR"; }
+trap cleanup EXIT
+
+# log in once if a username is set; the password goes over stdin, never on a command line
+login() {
+  [ -n "$QBIT_USER" ] || return 0
+  JAR=$(mktemp) || return 1
+  local out
+  out=$(printf '%s' "$QBIT_PASS" | curl -s -m 15 -c "$JAR" --data-urlencode "username=$QBIT_USER" \
+        --data-urlencode "password@-" "$QBIT_URL/api/v2/auth/login")
+  [ "$out" = "Ok." ]
+}
+
+# upload FILE -> prints "REPLY<newline>HTTP_CODE", returns curl's exit code
+upload() {
+  local cookie=()
+  [ -n "$JAR" ] && cookie=(-b "$JAR")
+  curl -s -m 30 "${cookie[@]}" -w '\n%{http_code}' -F "torrents=@$1" "$QBIT_URL/api/v2/torrents/add"
+}
+
+do_send() {
+  local files=() f out rc reply code result sent=0 failed=0
+  if [ $# -gt 0 ]; then files=("$@")
+  else shopt -s nullglob nocaseglob; files=("$WATCH_DIR"/*.torrent); shopt -u nullglob nocaseglob; fi
+  [ ${#files[@]} -gt 0 ] || return 0
+
+  if ! login; then
+    say "qBittorrent login FAILED at $QBIT_URL (check QBIT_USER/QBIT_PASS in $CONF); nothing sent"
+    notify "Login to qBittorrent failed, nothing sent (see $LOG)"; return 1
+  fi
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    if ! is_torrent "$f"; then log "skip (not a .torrent): $f"; continue; fi
+    sleep "$SETTLE"   # let the browser finish writing the file
+    out=$(upload "$f"); rc=$?
+    code=${out##*$'\n'}; reply=${out%$'\n'*}; [ "$out" = "$code" ] && reply=""
+    result=$(classify "$reply" "$code" "$rc")
+    case $result in
+      sent)
+        mkdir -p "$SENT_DIR"; mv -f "$f" "$SENT_DIR/"; say "sent: $(basename "$f")"; sent=$((sent+1)) ;;
+      unreachable|forbidden)
+        # not the file's fault: leave it where it is, it goes with the next run
+        say "qBittorrent $result at $QBIT_URL (HTTP $code); left in place: $(basename "$f")"
+        notify "qBittorrent is $result, $(basename "$f") was not sent (see $LOG)"; return 1 ;;
+      *)
+        # invalid file, or already in qBittorrent ("Conflict"): park it so it is not retried forever
+        mkdir -p "$FAILED_DIR"; mv -f "$f" "$FAILED_DIR/"
+        say "FAILED (${reply:-HTTP $code}): $(basename "$f") -> $FAILED_DIR"; failed=$((failed+1)) ;;
+    esac
+  done
+  if [ $((sent+failed)) -gt 0 ]; then
+    local msg="Sent $sent torrent(s) to qBittorrent"
+    [ $failed -gt 0 ] && msg="$msg, $failed FAILED (see $LOG)"
+    notify "$msg"
+  fi
+  [ $failed -eq 0 ]
+}
+
+# systemd escapes nothing in PathChanged= except specifiers: double any % in the folder name
+unit_path() { printf '%s' "${1//%/%%}"; }
+
+do_install() {
+  local self
+  self=$(readlink -f "$0") || { echo "cannot find my own path" >&2; return 1; }
+  mkdir -p "$WATCH_DIR" "$UNIT_DIR" "$DATA_DIR/kio/servicemenus" "$DATA_DIR/nautilus/scripts"
+  cat > "$UNIT_DIR/qbit-send.path" <<EOF
+# Created by qbit-send $VERSION
+[Unit]
+Description=Watch $WATCH_DIR for .torrent files (qbit-send)
+
+[Path]
+PathChanged=$(unit_path "$WATCH_DIR")
+Unit=qbit-send.service
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$UNIT_DIR/qbit-send.service" <<EOF
+# Created by qbit-send $VERSION
+[Unit]
+Description=Send new .torrent files to qBittorrent (qbit-send)
+
+[Service]
+Type=oneshot
+ExecStart="$self"
+EOF
+  # KDE Dolphin: right-click a .torrent > Send to qBittorrent (Plasma 6 wants it executable)
+  cat > "$DATA_DIR/kio/servicemenus/qbit-send.desktop" <<EOF
+[Desktop Entry]
+Type=Service
+MimeType=application/x-bittorrent;
+Actions=qbitSend
+X-KDE-Priority=TopLevel
+
+[Desktop Action qbitSend]
+Name=Send to qBittorrent
+Icon=document-send
+Exec="$self" %F
+EOF
+  chmod 755 "$DATA_DIR/kio/servicemenus/qbit-send.desktop"
+  # GNOME Files (Nautilus): right-click > Scripts > Send to qBittorrent
+  cat > "$DATA_DIR/nautilus/scripts/Send to qBittorrent" <<EOF
+#!/bin/bash
+# Created by qbit-send
+IFS=\$'\n'; exec "$self" \$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS
+EOF
+  chmod 755 "$DATA_DIR/nautilus/scripts/Send to qBittorrent"
+  systemctl --user daemon-reload && systemctl --user enable --now qbit-send.path >/dev/null 2>&1 \
+    || { echo "Could not start the folder watcher (systemctl --user enable --now qbit-send.path)" >&2; return 1; }
+  echo "Installed. .torrent files saved to $WATCH_DIR now go to $QBIT_URL by themselves."
+  echo "Right-click a .torrent in Dolphin (or Files > Scripts) for \"Send to qBittorrent\"."
+  [ -r "$CONF" ] || echo "Note: no $CONF yet, so the default $QBIT_URL is used (see qbit-send.conf.example)."
+}
+
+do_uninstall() {
+  systemctl --user disable --now qbit-send.path >/dev/null 2>&1
+  rm -f "$UNIT_DIR/qbit-send.path" "$UNIT_DIR/qbit-send.service" \
+        "$DATA_DIR/kio/servicemenus/qbit-send.desktop" "$DATA_DIR/nautilus/scripts/Send to qBittorrent"
+  systemctl --user daemon-reload 2>/dev/null
+  echo "Removed the folder watcher and right-click actions. Settings and log are kept:"
+  echo "  $CONF"
+  echo "  $LOG"
+}
+
+usage() {
+  cat <<EOF
+qbit-send $VERSION: send .torrent files to qBittorrent.
+
+  qbit-send                  send every .torrent in $WATCH_DIR
+  qbit-send FILE.torrent...  send those files
+  qbit-send --install        send new .torrent files automatically + right-click actions
+  qbit-send --uninstall      undo --install
+  qbit-send --version
+
+Settings: $CONF   Log: $LOG
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    --install) do_install ;;
+    --uninstall) do_uninstall ;;
+    --version) echo "qbit-send $VERSION" ;;
+    -h|--help) usage ;;
+    --) shift; do_send "$@" ;;
+    -*) usage >&2; return 2 ;;
+    *) do_send "$@" ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

@@ -1,0 +1,20 @@
+# qbit-send settings. Copy to ~/.config/qbit-send.conf and edit.
+# Keep it private (chmod 600) if you put a password in it.
+
+# qBittorrent Web UI address
+QBIT_URL="http://192.0.2.10:8080"
+
+# Web UI login. Leave empty if qBittorrent lets your network in without one
+# (Options > Web UI > "Bypass authentication for clients in whitelisted IP subnets").
+QBIT_USER=""
+QBIT_PASS=""
+
+# Folder watched by --install; your browser's download folder
+WATCH_DIR="$HOME/Downloads"
+
+# Where sent and rejected files are moved (default: subfolders of WATCH_DIR)
+#SENT_DIR="$HOME/Downloads/sent-torrents"
+#FAILED_DIR="$HOME/Downloads/failed-torrents"
+
+# Desktop pop-up after each batch (needs notify-send): yes or no
+NOTIFY="yes"
