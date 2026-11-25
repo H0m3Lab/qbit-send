@@ -56,7 +56,7 @@ change one: update both, give it a safe default, and add a CHANGELOG line.
 
 ## Conventions
 
-- Stay one file; bash, curl and systemd only.
+- Stay one file; bash, curl and systemd only (plus `flock` from util-linux when present).
 - Every outcome is logged with qBittorrent's answer; failures say what to do next.
 
 ## Data safety (do not break)

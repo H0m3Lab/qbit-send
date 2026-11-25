@@ -6,7 +6,7 @@
 #   qbit-send --uninstall        undo --install
 # Settings: ~/.config/qbit-send.conf (see qbit-send.conf.example). https://github.com/H0m3Lab/qbit-send
 set -o pipefail
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 CONF=${QBIT_SEND_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/qbit-send.conf}
 QBIT_URL="http://localhost:8080"
@@ -16,12 +16,15 @@ WATCH_DIR="$HOME/Downloads"
 SENT_DIR=""
 FAILED_DIR=""
 NOTIFY="yes"
+QBIT_CATEGORY=""
+QBIT_TIMEOUT=120
 # shellcheck source=/dev/null
 [ -r "$CONF" ] && . "$CONF"
 QBIT_URL=${QBIT_URL%/}
 SENT_DIR=${SENT_DIR:-$WATCH_DIR/sent-torrents}
 FAILED_DIR=${FAILED_DIR:-$WATCH_DIR/failed-torrents}
 LOG=${QBIT_SEND_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/qbit-send.log}
+LOCK=${QBIT_SEND_LOCK:-${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/qbit-send.lock}
 UNIT_DIR=${QBIT_SEND_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}
 DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}
 SETTLE=${QBIT_SEND_SETTLE:-1}
@@ -36,11 +39,17 @@ notify() {
 
 is_torrent() { case "${1,,}" in *.torrent) return 0 ;; *) return 1 ;; esac; }
 
-# classify REPLY HTTP_CODE CURL_EXIT -> sent | failed | unreachable | forbidden
+# classify REPLY HTTP_CODE CURL_EXIT -> sent | already | failed | unreachable | forbidden | timeout | unreadable
 classify() {
   local reply=$1 code=$2 rc=$3
+  # 26 = curl could not read the local file: the file's problem, not qBittorrent's
+  if [ "$rc" -eq 26 ]; then echo unreadable; return; fi
+  # 28 = no answer in time: qBittorrent may still have added it (a retry then gets "Conflict")
+  if [ "$rc" -eq 28 ]; then echo timeout; return; fi
   if [ "$rc" -ne 0 ] || [ "$code" = 000 ]; then echo unreachable; return; fi
   if [ "$code" = 401 ] || [ "$code" = 403 ]; then echo forbidden; return; fi
+  # 409 Conflict = this torrent is already in qBittorrent
+  if [ "$code" = 409 ]; then echo already; return; fi
   # qBittorrent 5.x answers with JSON ({"success_count":1,...}); older versions with "Ok."
   if [ "$reply" = "Ok." ] || printf '%s' "$reply" | grep -qE '"success_count": *[1-9]'; then
     echo sent; return; fi
@@ -61,11 +70,20 @@ login() {
   [ "$out" = "Ok." ]
 }
 
+# curl -F splits on , and ; unless the file name is quoted (quote and backslash escaped)
+form_file() {
+  local q=${1//\\/\\\\}
+  q=${q//\"/\\\"}
+  printf 'torrents=@"%s"' "$q"
+}
+
 # upload FILE -> prints "REPLY<newline>HTTP_CODE", returns curl's exit code
 upload() {
-  local cookie=()
+  local cookie=() extra=(-F stopped=false -F paused=false)
   [ -n "$JAR" ] && cookie=(-b "$JAR")
-  curl -s -m 30 "${cookie[@]}" -w '\n%{http_code}' -F "torrents=@$1" "$QBIT_URL/api/v2/torrents/add"
+  [ -n "$QBIT_CATEGORY" ] && extra+=(-F "category=$QBIT_CATEGORY")
+  curl -s -m "$QBIT_TIMEOUT" "${cookie[@]}" -w '\n%{http_code}' -F "$(form_file "$1")" "${extra[@]}" \
+       "$QBIT_URL/api/v2/torrents/add"
 }
 
 do_send() {
@@ -74,12 +92,20 @@ do_send() {
   else shopt -s nullglob nocaseglob; files=("$WATCH_DIR"/*.torrent); shopt -u nullglob nocaseglob; fi
   [ ${#files[@]} -gt 0 ] || return 0
 
+  # one run at a time: moving files out of the watch folder wakes the folder watcher again,
+  # and a right-click send can overlap it; the second run waits, then finds the files gone
+  if command -v flock >/dev/null; then
+    mkdir -p "$(dirname "$LOCK")"
+    exec 9>"$LOCK"
+    flock -w $((QBIT_TIMEOUT + 60)) 9 || { say "another qbit-send is still running; try again later"; return 1; }
+  fi
+
   if ! login; then
     say "qBittorrent login FAILED at $QBIT_URL (check QBIT_USER/QBIT_PASS in $CONF); nothing sent"
     notify "Login to qBittorrent failed, nothing sent (see $LOG)"; return 1
   fi
   for f in "${files[@]}"; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] || continue   # also: a run that waited for the lock skips what the other run sent
     if ! is_torrent "$f"; then log "skip (not a .torrent): $f"; continue; fi
     sleep "$SETTLE"   # let the browser finish writing the file
     out=$(upload "$f"); rc=$?
@@ -88,6 +114,14 @@ do_send() {
     case $result in
       sent)
         mkdir -p "$SENT_DIR"; mv -f "$f" "$SENT_DIR/"; say "sent: $(basename "$f")"; sent=$((sent+1)) ;;
+      already)
+        mkdir -p "$SENT_DIR"; mv -f "$f" "$SENT_DIR/"; say "already in qBittorrent: $(basename "$f")"; sent=$((sent+1)) ;;
+      unreadable)
+        # leave it: the browser may still be writing it, or permissions need fixing
+        say "could not read $(basename "$f"), left in place"; failed=$((failed+1)) ;;
+      timeout)
+        say "qBittorrent did not answer within ${QBIT_TIMEOUT}s at $QBIT_URL; left in place: $(basename "$f") (it may have been added; the next run checks)"
+        notify "qBittorrent is busy, $(basename "$f") will be retried (see $LOG)"; return 1 ;;
       unreachable|forbidden)
         # not the file's fault: leave it where it is, it goes with the next run
         say "qBittorrent $result at $QBIT_URL (HTTP $code); left in place: $(basename "$f")"

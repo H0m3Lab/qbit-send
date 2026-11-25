@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-25
+
+### Fixed
+- Files with a comma or semicolon in the name (common for tracker downloads) could not be read by
+  curl; this was reported as "qBittorrent unreachable" and stopped the whole batch.
+- Torrents stayed stopped when qBittorrent is set to add new torrents stopped; they now start.
+- The folder watcher and a manual or right-click send could run at once and send the same files
+  twice; runs now take turns (`flock`).
+
+### Changed
+- Wait up to 120 seconds for qBittorrent's answer instead of 30 (`QBIT_TIMEOUT`). A timeout leaves
+  the file in place; a retry of a torrent that did arrive counts as sent ("already in qBittorrent").
+- A torrent qBittorrent already has (409 Conflict) moves to `sent-torrents/`, not `failed-torrents/`.
+
+### Added
+- `QBIT_CATEGORY` setting: add torrents under a qBittorrent category.
+
 ## [0.1.0] - 2026-11-24
 
 ### Added

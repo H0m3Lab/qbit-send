@@ -18,3 +18,9 @@ WATCH_DIR="$HOME/Downloads"
 
 # Desktop pop-up after each batch (needs notify-send): yes or no
 NOTIFY="yes"
+
+# qBittorrent category for added torrents (empty = none)
+QBIT_CATEGORY=""
+
+# Seconds to wait for qBittorrent's answer per file
+QBIT_TIMEOUT=120

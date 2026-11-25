@@ -18,16 +18,19 @@ without installing a desktop torrent client or a browser extension.
 - `qbit-send --install` adds a systemd **user** path unit that watches your download folder. When a
   file appears, qbit-send uploads every `.torrent` there to qBittorrent's Web API
   (`/api/v2/torrents/add`).
-- Sent files move to `sent-torrents/` in that folder. Files qBittorrent rejects (not a valid
-  torrent, or already added) move to `failed-torrents/` so they are not retried forever.
-- If qBittorrent is off or refuses the login, files stay where they are and go with the next run.
+- Sent files move to `sent-torrents/` in that folder, and so do files qBittorrent already has.
+  Files it rejects (not a valid torrent) move to `failed-torrents/` so they are not retried forever.
+- If qBittorrent is off, refuses the login, or does not answer within `QBIT_TIMEOUT`, files stay
+  where they are and go with the next run.
+- Only one run sends at a time (the folder watcher and a right-click send can overlap).
 - A desktop pop-up says what happened (if `notify-send` is there). Every action goes to the log.
 - Right-click actions: KDE Dolphin (a service menu for `.torrent` files) and GNOME Files (Scripts menu).
-- Torrents are added with qBittorrent's own defaults (save path, category, start or paused).
+- Torrents start right away, even when qBittorrent is set to add new torrents stopped. Save path
+  follows qBittorrent's defaults; set `QBIT_CATEGORY` to file them under a category.
 
 ## Requirements
 
-- bash, curl, systemd (user session)
+- bash, curl, systemd (user session); `flock` from util-linux (on every systemd system) keeps runs from overlapping
 - qBittorrent 4.1 or newer with the Web UI on
 - Optional: `notify-send` (libnotify) for pop-ups
 
@@ -64,6 +67,8 @@ Run `--install` again after moving the script or changing `WATCH_DIR`.
 | `SENT_DIR` | `WATCH_DIR/sent-torrents` | Where sent files go. |
 | `FAILED_DIR` | `WATCH_DIR/failed-torrents` | Where rejected files go. |
 | `NOTIFY` | `yes` | Desktop pop-up after each batch. |
+| `QBIT_CATEGORY` | empty | qBittorrent category for added torrents. Empty = none. |
+| `QBIT_TIMEOUT` | `120` | Seconds to wait for qBittorrent's answer per file. |
 
 **No login needed on a home network:** in qBittorrent, Options > Web UI > tick "Bypass
 authentication for clients in whitelisted IP subnets" and add your network (for example
@@ -81,7 +86,9 @@ If you do set a password, keep the file private: `chmod 600 ~/.config/qbit-send.
   `curl http://<server>:8080/api/v2/app/version`.
 - **"qBittorrent forbidden (HTTP 403)"**: the Web UI wants a login. Set `QBIT_USER`/`QBIT_PASS`, or
   whitelist your network. Too many failed logins make qBittorrent ban your IP for a while.
-- **A file in `failed-torrents/`**: the log shows why. `Conflict` means qBittorrent already has it.
+- **A file in `failed-torrents/`**: the log shows why (usually not a valid torrent file).
+- **"did not answer within 120s"**: qBittorrent was busy (often a slow disk). The file stays and is
+  sent again on the next run; if it had arrived after all, the log says "already in qBittorrent".
 - **No "Send to qBittorrent" in Dolphin**: close every Dolphin window and reopen it. The service
   menu must stay executable (`--install` sets that).
 
